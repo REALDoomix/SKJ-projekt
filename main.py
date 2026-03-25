@@ -2,6 +2,8 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
 from typing import Annotated
 
+from support import *
+
 import os,json,aiofiles,uuid
 
 from multipart import *
@@ -64,17 +66,40 @@ async def upload_file(
     return metadata
 
 @app.get("/files/{file_id}")
-async def get_file(file_id: str):
+async def get_file(id: str):
     with open(METADATA, "r") as f:
         data = json.load(f)
 
-    if file_id not in data:
+    if id not in data:
         raise HTTPException(status_code=404, detail="Soubor nenalezen")
         
-    file_info = data[file_id]
+    file_info = data[id]
     file_path = file_info["path"]
     
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Soubor na disku chybí")
         
     return FileResponse(path=file_path, filename=file_info["filename"])
+
+
+@app.delete("/files/{file_id}")
+def delete_file(file_id: str, user_id: str):
+    metadata = load_metadata()
+
+    if file_id not in metadata:
+        raise HTTPException(status_code=404, detail="Soubor nenalezen")
+
+    file_info = metadata[file_id]
+
+
+    if file_info["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="NEMAS PRISTUP DUPO")
+    
+
+    if os.path.exists(file_info["path"]):
+        os.remove(file_info["path"])
+
+    del metadata[file_id]
+    save_metadata(metadata)
+
+    return {"message": "soubor je fuč"}

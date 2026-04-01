@@ -152,3 +152,5 @@ def delete_file(file_id: str, user_id: str, db: Session = Depends(get_db)):
     db.commit()
 
     return {"message": "soubor je fuč"}
+
+#Komentar

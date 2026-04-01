@@ -1,23 +1,50 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
 from fastapi.responses import FileResponse
 from typing import Annotated
+from datetime import datetime
+
+from sqlalchemy import create_engine, String, DateTime
+from sqlalchemy.orm import DeclarativeBase, Mapped, MappedColumn, Session, sessionmaker
 
 from support import *
 
-import os,json,aiofiles,uuid
-
-from multipart import *
+import os, aiofiles, uuid
 
 app = FastAPI()
 
+# Database configuration
+DATABASE_URL = "sqlite:///./files_database.db"
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# Base class for models
+class Base(DeclarativeBase):
+    pass
+
+# File model
+class FileRecord(Base):
+    __tablename__ = "files"
+    
+    id: Mapped[str] = MappedColumn(String, primary_key=True)
+    user_id: Mapped[str] = MappedColumn(String, index=True)
+    filename: Mapped[str] = MappedColumn(String)
+    path: Mapped[str] = MappedColumn(String)
+    size: Mapped[int] = MappedColumn()
+    created_at: Mapped[datetime] = MappedColumn(DateTime, default=datetime.utcnow)
+
+# Create tables
+Base.metadata.create_all(bind=engine)
+
 STORAGE_DIR = "storage"
-METADATA = "metadata.json"
-
-
 os.makedirs(STORAGE_DIR, exist_ok=True)
-if not os.path.exists(METADATA):
-    with open(METADATA, "w") as f:
-        json.dump({}, f)
+
+# Dependency to get database session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 @app.get("/")
@@ -32,7 +59,8 @@ def read_item(item_id: int, q: str | None = None):
 @app.post("/files/upload")
 async def upload_file(
     file: Annotated[UploadFile, File()],
-    user_id: Annotated[str,Form()]):
+    user_id: Annotated[str, Form()],
+    db: Session = Depends(get_db)):
 
     file_id = str(uuid.uuid4())
 
@@ -46,60 +74,56 @@ async def upload_file(
         await out_file.write(content)
 
     file_size = len(content)
-    metadata = {
-        "id": file_id,
-        "user_id": user_id,
-        "filename": file.filename,
-        "path": file_path,
-        "size": file_size
+    
+    # Save to database
+    file_record = FileRecord(
+        id=file_id,
+        user_id=user_id,
+        filename=file.filename,
+        path=file_path,
+        size=file_size,
+        created_at=datetime.utcnow()
+    )
+    db.add(file_record)
+    db.commit()
+    db.refresh(file_record)
+
+    return {
+        "id": file_record.id,
+        "user_id": file_record.user_id,
+        "filename": file_record.filename,
+        "path": file_record.path,
+        "size": file_record.size,
+        "created_at": file_record.created_at
     }
 
-    with open(METADATA, "r+") as f:
-        data = json.load(f)
-
-        data[file_id] = metadata
-
-        f.seek(0)
-        json.dump(data, f, indent=2)
-
-
-    return metadata
-
 @app.get("/files/{file_id}")
-async def get_file(id: str):
-    with open(METADATA, "r") as f:
-        data = json.load(f)
+async def get_file(file_id: str, db: Session = Depends(get_db)):
+    file_record = db.query(FileRecord).filter(FileRecord.id == file_id).first()
 
-    if id not in data:
+    if not file_record:
         raise HTTPException(status_code=404, detail="Soubor nenalezen")
-        
-    file_info = data[id]
-    file_path = file_info["path"]
     
-    if not os.path.exists(file_path):
+    if not os.path.exists(file_record.path):
         raise HTTPException(status_code=404, detail="Soubor na disku chybí")
         
-    return FileResponse(path=file_path, filename=file_info["filename"])
+    return FileResponse(path=file_record.path, filename=file_record.filename)
 
 
 @app.delete("/files/{file_id}")
-def delete_file(file_id: str, user_id: str):
-    metadata = load_metadata()
+def delete_file(file_id: str, user_id: str, db: Session = Depends(get_db)):
+    file_record = db.query(FileRecord).filter(FileRecord.id == file_id).first()
 
-    if file_id not in metadata:
+    if not file_record:
         raise HTTPException(status_code=404, detail="Soubor nenalezen")
 
-    file_info = metadata[file_id]
-
-
-    if file_info["user_id"] != user_id:
+    if file_record.user_id != user_id:
         raise HTTPException(status_code=403, detail="NEMAS PRISTUP DUPO")
     
+    if os.path.exists(file_record.path):
+        os.remove(file_record.path)
 
-    if os.path.exists(file_info["path"]):
-        os.remove(file_info["path"])
-
-    del metadata[file_id]
-    save_metadata(metadata)
+    db.delete(file_record)
+    db.commit()
 
     return {"message": "soubor je fuč"}

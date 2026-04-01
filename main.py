@@ -2,6 +2,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
 from fastapi.responses import FileResponse
 from typing import Annotated
 from datetime import datetime
+from pydantic import BaseModel
 
 from sqlalchemy import create_engine, String, DateTime
 from sqlalchemy.orm import DeclarativeBase, Mapped, MappedColumn, Session, sessionmaker
@@ -12,18 +13,45 @@ import os, aiofiles, uuid
 
 app = FastAPI()
 
-# Database configuration
+# ==================== Pydantic Models ====================
+
+class FileInfoResponse(BaseModel):
+    """Response model pro uploaded soubor"""
+    id: str
+    user_id: str
+    filename: str
+    path: str
+    size: int
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+
+class DeleteMessageResponse(BaseModel):
+    """Response model pro smazaný soubor"""
+    message: str
+
+
+class RootResponse(BaseModel):
+    """Response model pro root endpoint"""
+    Hello: str
+
+
+class ItemResponse(BaseModel):
+    """Response model pro items endpoint"""
+    item_id: int
+    q: str | None = None
+
+# ==================== Database Configuration ====================
+
 DATABASE_URL = "sqlite:///./files_database.db"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False}, echo = True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # Base class for models
 class Base(DeclarativeBase):
     pass
-
-#Test for pull request!
-
-#Tady jsem neco pridal lmao
 
 # File model
 class FileRecord(Base):
@@ -51,16 +79,16 @@ def get_db():
         db.close()
 
 
-@app.get("/")
+@app.get("/", response_model=RootResponse)
 def read_root():
     return {"Hello": "World"}
 
 
-@app.get("/items/{item_id}")
+@app.get("/items/{item_id}", response_model=ItemResponse)
 def read_item(item_id: int, q: str | None = None):
     return {"item_id": item_id, "q": q}
 
-@app.post("/files/upload")
+@app.post("/files/upload", response_model=FileInfoResponse)
 async def upload_file(
     file: Annotated[UploadFile, File()],
     user_id: Annotated[str, Form()],
@@ -92,14 +120,7 @@ async def upload_file(
     db.commit()
     db.refresh(file_record)
 
-    return {
-        "id": file_record.id,
-        "user_id": file_record.user_id,
-        "filename": file_record.filename,
-        "path": file_record.path,
-        "size": file_record.size,
-        "created_at": file_record.created_at
-    }
+    return file_record
 
 @app.get("/files/{file_id}")
 async def get_file(file_id: str, db: Session = Depends(get_db)):
@@ -114,7 +135,7 @@ async def get_file(file_id: str, db: Session = Depends(get_db)):
     return FileResponse(path=file_record.path, filename=file_record.filename)
 
 
-@app.delete("/files/{file_id}")
+@app.delete("/files/{file_id}", response_model=DeleteMessageResponse)
 def delete_file(file_id: str, user_id: str, db: Session = Depends(get_db)):
     file_record = db.query(FileRecord).filter(FileRecord.id == file_id).first()
 

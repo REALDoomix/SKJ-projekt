@@ -23,6 +23,8 @@ class Base(DeclarativeBase):
 
 #Test for pull request!
 
+#Tady jsem neco pridal lmao
+
 # File model
 class FileRecord(Base):
     __tablename__ = "files"

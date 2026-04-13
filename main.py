@@ -4,8 +4,10 @@ from typing import Annotated
 from datetime import datetime
 from pydantic import BaseModel
 
-from sqlalchemy import create_engine, String, DateTime
-from sqlalchemy.orm import DeclarativeBase, Mapped, MappedColumn, Session, sessionmaker
+from sqlalchemy.orm import Session
+from database import Base, engine, SessionLocal
+
+from models import FileRecord, Bucket
 
 from support import *
 
@@ -43,26 +45,17 @@ class ItemResponse(BaseModel):
     item_id: int
     q: str | None = None
 
-# ==================== Database Configuration ====================
+class BucketCreate(BaseModel):
+    name: str
 
-DATABASE_URL = "sqlite:///./files_database.db"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False}, echo = True)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# Base class for models
-class Base(DeclarativeBase):
-    pass
+class BucketResponse(BaseModel):
+    id: str
+    name: str
+    created_at: datetime
 
-# File model
-class FileRecord(Base):
-    __tablename__ = "files"
-    
-    id: Mapped[str] = MappedColumn(String, primary_key=True)
-    user_id: Mapped[str] = MappedColumn(String, index=True)
-    filename: Mapped[str] = MappedColumn(String)
-    path: Mapped[str] = MappedColumn(String)
-    size: Mapped[int] = MappedColumn()
-    created_at: Mapped[datetime] = MappedColumn(DateTime, default=datetime.utcnow)
+    class Config:
+        from_attributes = True
 
 # Create tables
 Base.metadata.create_all(bind=engine)
@@ -92,14 +85,20 @@ def read_item(item_id: int, q: str | None = None):
 async def upload_file(
     file: Annotated[UploadFile, File()],
     user_id: Annotated[str, Form()],
+    bucket_id: Annotated[str, Form()],
     db: Session = Depends(get_db)):
 
     file_id = str(uuid.uuid4())
 
-    user_dir = os.path.join(STORAGE_DIR, user_id)
-    os.makedirs(user_dir, exist_ok=True)
+    bucket = db.query(Bucket).filter(Bucket.id == bucket_id).first()
 
-    file_path = os.path.join(user_dir, file_id)
+    if not bucket:
+        raise HTTPException(status_code=404, detail="Bucket neexistuje")
+
+    bucket_dir = os.path.join(STORAGE_DIR, bucket_id)
+    os.makedirs(bucket_dir, exist_ok=True)
+
+    file_path = os.path.join(bucket_dir, file_id)
 
     async with aiofiles.open(file_path, 'wb') as out_file:
         content = await file.read()
@@ -114,7 +113,8 @@ async def upload_file(
         filename=file.filename,
         path=file_path,
         size=file_size,
-        created_at=datetime.utcnow()
+        created_at=datetime.utcnow(),
+        bucket_id=bucket_id
     )
     db.add(file_record)
     db.commit()
@@ -153,4 +153,33 @@ def delete_file(file_id: str, user_id: str, db: Session = Depends(get_db)):
 
     return {"message": "soubor je fuč"}
 
-#Komentar
+
+@app.post("/buckets", response_model=BucketResponse)
+def create_bucket(bucket: BucketCreate, db: Session = Depends(get_db)):
+    
+    existing = db.query(Bucket).filter(Bucket.name == bucket.name).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Bucket s tímto jménem už existuje")
+
+    new_bucket = Bucket(
+        id=str(uuid.uuid4()),
+        name=bucket.name,
+        created_at=datetime.utcnow()
+    )
+
+    db.add(new_bucket)
+    db.commit()
+    db.refresh(new_bucket)
+
+    return new_bucket
+
+@app.get("/buckets/{bucket_id}/files", response_model=list[FileInfoResponse])
+def get_files_in_bucket(bucket_id: str, db: Session = Depends(get_db)):
+
+    bucket = db.query(Bucket).filter(Bucket.id == bucket_id).first()
+    if not bucket:
+        raise HTTPException(status_code=404, detail="Bucket neexistuje")
+
+    files = db.query(FileRecord).filter(FileRecord.bucket_id == bucket_id).all()
+
+    return files

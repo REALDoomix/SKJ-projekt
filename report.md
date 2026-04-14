@@ -30,3 +30,15 @@ my_uuid = uuid.uuid4()
 ## Jaké chyby AI udělalo?
 
 Zatím nic.
+
+# Úkol alembic, Buckety a Účtování
+
+## Příklady použitých promptů:
+
+
+```
+>Měl bych použít Starlette pro middleware, nebo už to některá z importovaných knihoven zvládá?
+
+>>Knihovna FastAPI má zabudovanou jednodušší metodu přes @app.middleware("http") decorator, nebo ještě simplističtější - použíjte Dependency injection
+```
+

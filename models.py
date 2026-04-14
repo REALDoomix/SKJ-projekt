@@ -1,4 +1,4 @@
-from sqlalchemy import String, DateTime, ForeignKey
+from sqlalchemy import String, DateTime, ForeignKey, Boolean, Integer
 from sqlalchemy.orm import Mapped, MappedColumn
 from datetime import datetime
 
@@ -15,6 +15,8 @@ class FileRecord(Base):
     size: Mapped[int] = MappedColumn()
     created_at: Mapped[datetime] = MappedColumn(DateTime, default=datetime.utcnow)
 
+    is_deleted: Mapped[bool] = MappedColumn(Boolean, default=False)
+
     bucket_id: Mapped[str] = MappedColumn(String, ForeignKey("buckets.id"))
 
 
@@ -25,3 +27,6 @@ class Bucket(Base):
     name: Mapped[str] = MappedColumn(String, unique=True)
     created_at: Mapped[datetime] = MappedColumn(DateTime, default=datetime.utcnow)
     bandwidth_bytes: Mapped[int] = MappedColumn(default=0)
+
+    count_read_requests: Mapped[int] = MappedColumn(Integer, default=0)
+    count_write_requests: Mapped[int] = MappedColumn(Integer, default=0)

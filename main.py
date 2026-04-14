@@ -15,6 +15,8 @@ import os, aiofiles, uuid
 
 app = FastAPI()
 
+
+
 # ==================== Pydantic Models ====================
 
 class FileInfoResponse(BaseModel):
@@ -131,7 +133,7 @@ async def upload_file(
 async def get_file(file_id: str, db: Session = Depends(get_db)):
     file_record = db.query(FileRecord).filter(FileRecord.id == file_id).first()
 
-    if not file_record:
+    if not file_record or file_record.is_deleted:
         raise HTTPException(status_code=404, detail="Soubor nenalezen")
     
     bucket = db.query(Bucket).filter(Bucket.id == file_record.bucket_id).first()
@@ -148,6 +150,7 @@ async def get_file(file_id: str, db: Session = Depends(get_db)):
 
 @app.delete("/files/{file_id}", response_model=DeleteMessageResponse)
 def delete_file(file_id: str, user_id: str, db: Session = Depends(get_db)):
+    
     file_record = db.query(FileRecord).filter(FileRecord.id == file_id).first()
 
     if not file_record:
@@ -159,7 +162,9 @@ def delete_file(file_id: str, user_id: str, db: Session = Depends(get_db)):
     if os.path.exists(file_record.path):
         os.remove(file_record.path)
 
-    db.delete(file_record)
+    file_record.is_deleted = True
+
+    #db.delete(file_record)
     db.commit()
 
     return {"message": "soubor je fuč"}
@@ -191,7 +196,8 @@ def get_files_in_bucket(bucket_id: str, db: Session = Depends(get_db)):
     if not bucket:
         raise HTTPException(status_code=404, detail="Bucket neexistuje")
 
-    files = db.query(FileRecord).filter(FileRecord.bucket_id == bucket_id).all()
+    files = db.query(FileRecord).filter(FileRecord.bucket_id == bucket_id,
+                                        FileRecord.is_deleted == False).all()
 
     return files
 

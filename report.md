@@ -30,3 +30,26 @@ my_uuid = uuid.uuid4()
 ## Jaké chyby AI udělalo?
 
 Zatím nic.
+
+
+
+
+# Evoluce databáze: Alembic, Buckety a Účtování
+
+## Které technologie byly použity?
+AI chatboty použity při tvoření aplikace:
+ - Gemini 3.1 PRO
+
+## Příklady použitých promptů:
+``How to use Alembic with SQLAlchemy models in FastAPI?``
+
+``Why does SQLite fail when adding NOT NULL column with Alembic?``
+
+
+## Co AI vygenerovala správně?
+- AI pomohla s pochopením práce s Alembicem, konkrétně jak propojit existující SQLAlchemy modely s migračním systémem (nastavení `target_metadata` v `env.py`). 
+
+ - Dále správně vysvětlila problém při migraci v SQLite, kdy nelze přidat sloupec s `NOT NULL` bez výchozí hodnoty, což pomohlo opravit migraci nastavením `nullable=True`.
+
+## Jaké chyby AI udělalo?
+AI občas navrhovala řešení bez ohledu na omezení SQLite (např. přidání `NOT NULL` sloupce bez defaultní hodnoty), což vedlo k chybě při migraci. Bylo nutné úpravy provést ručně.

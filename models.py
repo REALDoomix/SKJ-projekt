@@ -24,3 +24,4 @@ class Bucket(Base):
     id: Mapped[str] = MappedColumn(String, primary_key=True)
     name: Mapped[str] = MappedColumn(String, unique=True)
     created_at: Mapped[datetime] = MappedColumn(DateTime, default=datetime.utcnow)
+    bandwidth_bytes: Mapped[int] = MappedColumn(default=0)

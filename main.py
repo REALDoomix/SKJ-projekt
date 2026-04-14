@@ -57,6 +57,10 @@ class BucketResponse(BaseModel):
     class Config:
         from_attributes = True
 
+class BucketBillingResponse(BaseModel):
+    bucket_id: str
+    bandwidth_bytes: int
+
 # Create tables
 Base.metadata.create_all(bind=engine)
 
@@ -105,6 +109,7 @@ async def upload_file(
         await out_file.write(content)
 
     file_size = len(content)
+    bucket.bandwidth_bytes += file_size
     
     # Save to database
     file_record = FileRecord(
@@ -128,6 +133,12 @@ async def get_file(file_id: str, db: Session = Depends(get_db)):
 
     if not file_record:
         raise HTTPException(status_code=404, detail="Soubor nenalezen")
+    
+    bucket = db.query(Bucket).filter(Bucket.id == file_record.bucket_id).first()
+
+    if bucket:
+        bucket.bandwidth_bytes += file_record.size
+        db.commit()
     
     if not os.path.exists(file_record.path):
         raise HTTPException(status_code=404, detail="Soubor na disku chybí")
@@ -183,3 +194,16 @@ def get_files_in_bucket(bucket_id: str, db: Session = Depends(get_db)):
     files = db.query(FileRecord).filter(FileRecord.bucket_id == bucket_id).all()
 
     return files
+
+@app.get("/buckets/{bucket_id}/billing", response_model=BucketBillingResponse)
+def get_bucket_billing(bucket_id: str, db: Session = Depends(get_db)):
+
+    bucket = db.query(Bucket).filter(Bucket.id == bucket_id).first()
+
+    if not bucket:
+        raise HTTPException(status_code=404, detail="Bucket neexistuje")
+
+    return {
+        "bucket_id": bucket.id,
+        "bandwidth_bytes": bucket.bandwidth_bytes or 0
+    }

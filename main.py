@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request
 from fastapi.responses import FileResponse
 from typing import Annotated
 from datetime import datetime
@@ -12,9 +12,10 @@ from models import FileRecord, Bucket
 
 from support import *
 
-import os, aiofiles, uuid
+import os, aiofiles, uuid, websockets, json
 
 app = FastAPI()
+BROKER_URI = "ws://127.0.0.1:8001/broker"
 
 
 # ==================== Middleware ====================
@@ -109,6 +110,11 @@ class BucketStatsResponse(BaseModel):
     class Config:
         from_attributes = True
 
+
+class ProcessRequest(BaseModel):
+    operation: str
+    image_path: str
+
 # Create tables
 Base.metadata.create_all(bind=engine)
 
@@ -127,6 +133,10 @@ def get_db():
 @app.get("/", response_model=RootResponse)
 def read_root():
     return {"Hello": "World"}
+
+async def send_to_broker(message: dict):
+    async with websockets.connect(BROKER_URI) as ws:
+        await ws.send(json.dumps(message))
 
 
 @app.get("/items/{item_id}", response_model=ItemResponse)
@@ -270,3 +280,21 @@ def get_bucket_stats(bucket_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Bucket neexistuje")
     
     return bucket
+
+
+
+@app.post("/process")
+async def process(data: ProcessRequest):
+
+    message = {
+        "action": "publish",
+        "topic": "image.jobs",
+        "payload": {
+            "operation": data.operation,
+            "image_path": data.image_path
+        }
+    }
+
+    await send_to_broker(message)
+
+    return {"status": "processing_started"}

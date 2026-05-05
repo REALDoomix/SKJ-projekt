@@ -15,9 +15,6 @@ from database import Base, engine, SessionLocal
 
 from models import FileRecord, Bucket
 
-
-from support import *
-
 import os, aiofiles, uuid, websockets, json
 
 # Background task pro naslouchání na image.done

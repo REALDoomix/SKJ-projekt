@@ -4,17 +4,53 @@ from typing import Annotated
 from datetime import datetime
 from pydantic import BaseModel
 from starlette.requests import Request
+import asyncio
+from contextlib import asynccontextmanager
+
+from fastapi.middleware.cors import CORSMiddleware
+
 
 from sqlalchemy.orm import Session
 from database import Base, engine, SessionLocal
 
 from models import FileRecord, Bucket
 
+
 from support import *
 
 import os, aiofiles, uuid, websockets, json
 
-app = FastAPI()
+# Background task pro naslouchání na image.done
+broker_listener_task = None
+
+
+# ==================== LIFESPAN ====================
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup - spusť background task
+    global broker_listener_task
+    broker_listener_task = asyncio.create_task(listen_to_broker_results())
+    print("Background task spusten")
+    
+    yield
+    
+    # Shutdown - zastavit background task
+    if broker_listener_task:
+        broker_listener_task.cancel()
+        print("Background task zastaven")
+
+
+app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 BROKER_URI = "ws://127.0.0.1:8001/broker"
 
 
@@ -113,7 +149,7 @@ class BucketStatsResponse(BaseModel):
 
 class ProcessRequest(BaseModel):
     operation: str
-    image_path: str
+    operation_params: dict | None = None
 
 # Create tables
 Base.metadata.create_all(bind=engine)
@@ -135,8 +171,12 @@ def read_root():
     return {"Hello": "World"}
 
 async def send_to_broker(message: dict):
-    async with websockets.connect(BROKER_URI) as ws:
-        await ws.send(json.dumps(message))
+    try:
+        async with websockets.connect(BROKER_URI) as ws:
+            await ws.send(json.dumps(message))
+            print(f"[Gateway] Poslano do brokera: {message.get('topic')}")
+    except Exception as e:
+        print(f"[Gateway] Chyba pri poslani do brokera: {e}")
 
 
 @app.get("/items/{item_id}", response_model=ItemResponse)
@@ -160,7 +200,10 @@ async def upload_file(
     bucket_dir = os.path.join(STORAGE_DIR, bucket_id)
     os.makedirs(bucket_dir, exist_ok=True)
 
-    file_path = os.path.join(bucket_dir, file_id)
+    file_ext = os.path.splitext(file.filename)[1]
+    file_path = os.path.join(bucket_dir, file_id + file_ext)
+
+    '''file_path = os.path.join(bucket_dir, file_id)'''
 
     async with aiofiles.open(file_path, 'wb') as out_file:
         content = await file.read()
@@ -282,19 +325,142 @@ def get_bucket_stats(bucket_id: str, db: Session = Depends(get_db)):
     return bucket
 
 
-
-@app.post("/process")
-async def process(data: ProcessRequest):
-
+@app.post("/buckets/{bucket_id}/objects/{file_id}/process")
+async def process_object(
+    bucket_id: str,
+    file_id: str,
+    request_data: ProcessRequest,
+    db: Session = Depends(get_db)
+):
+    """S3 Gateway style endpoint pro zpracování obrázku"""
+    
+    # Ověř že soubor existuje
+    file_record = db.query(FileRecord).filter(
+        FileRecord.id == file_id,
+        FileRecord.bucket_id == bucket_id,
+        FileRecord.is_deleted == False
+    ).first()
+    
+    if not file_record:
+        raise HTTPException(status_code=404, detail="Soubor nenalezen")
+    
+    # Okamžitě vrať odpověď
     message = {
         "action": "publish",
         "topic": "image.jobs",
         "payload": {
-            "operation": data.operation,
-            "image_path": data.image_path
+            "operation": request_data.operation,
+            "image_path": file_record.path,
+            "file_id": file_id,
+            "bucket_id": bucket_id,
+            "user_id": file_record.user_id,
+            "operation_params": request_data.operation_params
         }
     }
-
-    await send_to_broker(message)
-
+    
+    # Neblokuj - pošli do brokera v backgroundu
+    asyncio.create_task(send_to_broker(message))
+    
     return {"status": "processing_started"}
+
+
+# ==================== BACKGROUND TASK PRO ZPRACOVANÉ OBRÁZKY ====================
+
+async def listen_to_broker_results():
+    """Background task, která naslouchá výsledky z image.done"""
+    BROKER_URI = "ws://127.0.0.1:8001/broker"
+    
+    while True:
+        try:
+            print("[Gateway] Pripojuji se na broker...")
+            async with websockets.connect(BROKER_URI) as ws:
+                # Subscribe na výsledky
+                await ws.send(json.dumps({
+                    "action": "subscribe",
+                    "topic": "image.done"
+                }))
+                
+                print("[Gateway] Naslouchám na image.done...")
+                
+                while True:
+                    msg = await ws.recv()
+                    
+                    if isinstance(msg, bytes):
+                        msg = msg.decode()
+                    
+                    data = json.loads(msg)
+                    payload = data.get("payload", data)
+                    
+                    # Kontrola povinných polí
+                    file_id = payload.get("file_id")
+                    bucket_id = payload.get("bucket_id")
+                    user_id = payload.get("user_id")
+                    operation = payload.get("operation")
+                    status = payload.get("status")
+                    
+                    if not all([file_id, bucket_id, user_id, status]):
+                        print(f"Ignoruju neuplnou zpravu: {payload}")
+                        continue
+                    
+                    # Zpracuj error zprávy
+                    if status == "error":
+                        error_msg = payload.get("error", "Neznámá chyba")
+                        print(f"Chyba z workeru: {file_id} - {operation}")
+                        print(f"   Popis: {error_msg}")
+                        continue
+                    
+                    # Zpracuj úspěšné zprávy
+                    if status != "done":
+                        print(f"Neznámý status: {status}")
+                        continue
+                    
+                    output_path = payload.get("output_path")
+                    if not output_path:
+                        print(f"Zprava typu 'done' bez output_path: {payload}")
+                        continue
+                    
+                    print(f"Prijato z image.done: {file_id} - {operation}")
+                    
+                    # Ulož do databáze
+                    db = SessionLocal()
+                    try:
+                        # Vytvořit nový FileRecord pro zpracovaný obrázek
+                        processed_file_id = str(uuid.uuid4())
+                        
+                        # Získej originální soubor pro info
+                        original_file = db.query(FileRecord).filter(
+                            FileRecord.id == file_id
+                        ).first()
+                        
+                        if original_file:
+                            # Získej velikost zpracovaného souboru
+                            file_size = 0
+                            if os.path.exists(output_path):
+                                file_size = os.path.getsize(output_path)
+                            
+                            # Vytvoř nový FileRecord
+                            processed_record = FileRecord(
+                                id=processed_file_id,
+                                user_id=user_id,
+                                filename=f"{operation}_{original_file.filename}",
+                                path=output_path,
+                                size=file_size,
+                                created_at=datetime.utcnow(),
+                                bucket_id=bucket_id
+                            )
+                            
+                            db.add(processed_record)
+                            db.commit()
+                            
+                            print(f"Ulozeno zpracovane obrazky: {processed_file_id}")
+                        else:
+                            print(f"Originalni soubor {file_id} nebyl nalezen v DB")
+                    except Exception as e:
+                        print(f"Chyba pri ukladani do DB: {e}")
+                        db.rollback()
+                    finally:
+                        db.close()
+        
+        except Exception as e:
+            print(f"Chyba v broker listeneru: {e}")
+            await asyncio.sleep(5)  # Počkej před reconnectem

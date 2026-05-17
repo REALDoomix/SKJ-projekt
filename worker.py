@@ -22,7 +22,7 @@ def mirror(img):
     return img[:, ::-1, :], None
 
 
-def crop(img, crop_params=None):
+def crop(img, crop_params):
     """
     Ořízne obrázek na základě parametrů.
     

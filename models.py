@@ -11,8 +11,15 @@ class FileRecord(Base):
     id: Mapped[str] = MappedColumn(String, primary_key=True)
     user_id: Mapped[str] = MappedColumn(String, index=True)
     filename: Mapped[str] = MappedColumn(String)
-    path: Mapped[str] = MappedColumn(String)
-    size: Mapped[int] = MappedColumn()
+    
+    path: Mapped[str | None] = MappedColumn(String, nullable=True)
+
+    status: Mapped[str] = MappedColumn(String, default="uploading")
+
+    volume_id: Mapped[int | None] = MappedColumn(Integer, nullable=True)
+    offset: Mapped[int | None] = MappedColumn(Integer, nullable=True)
+    size: Mapped[int | None] = MappedColumn(Integer, nullable=True)
+
     created_at: Mapped[datetime] = MappedColumn(DateTime, default=datetime.utcnow)
 
     is_deleted: Mapped[bool] = MappedColumn(Boolean, default=False)

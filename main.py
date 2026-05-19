@@ -109,6 +109,10 @@ class FileInfoResponse(BaseModel):
     class Config:
         from_attributes = True
 
+class FileRecordUpdate(BaseModel):
+    offset: int
+    volume_id: int
+
 
 class DeleteMessageResponse(BaseModel):
     """Response model pro smazaný soubor"""
@@ -314,6 +318,27 @@ def get_files_in_bucket(bucket_id: str, db: Session = Depends(get_db)):
                                         FileRecord.is_deleted == False).all()
 
     return files
+
+@app.get("/admin/volumes/{volume_id}/files", response_model=list[FileInfoResponse])
+def get_files_by_volume(volume_id: int, db: Session = Depends(get_db)):
+    """Administration endpoint to fetch all files in a specific volume"""
+    files = db.query(FileRecord).filter(
+        FileRecord.volume_id == volume_id,
+        FileRecord.is_deleted == False
+    ).all()
+    return files
+
+@app.patch("/admin/files/{file_id}")
+def update_file_record(file_id: str, update_data: FileRecordUpdate, db: Session = Depends(get_db)):
+    """Administration endpoint to update file offset and volume"""
+    file_record = db.query(FileRecord).filter(FileRecord.id == file_id).first()
+    if not file_record:
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    file_record.offset = update_data.offset
+    file_record.volume_id = update_data.volume_id
+    db.commit()
+    return {"message": "Updated successfully"}
 
 @app.get("/buckets/{bucket_id}/billing", response_model=BucketBillingResponse)
 def get_bucket_billing(bucket_id: str, db: Session = Depends(get_db)):

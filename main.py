@@ -1,24 +1,27 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from typing import Annotated
 from datetime import datetime
 from pydantic import BaseModel
 from starlette.requests import Request
-import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi.middleware.cors import CORSMiddleware
-
 
 from sqlalchemy.orm import Session
 from database import Base, engine, SessionLocal
 
 from models import FileRecord, Bucket
 
-import os, aiofiles, uuid, websockets, json
+import os, aiofiles, uuid, websockets, json, asyncio, base64, httpx
+
 
 # Background task pro naslouchání na image.done
 broker_listener_task = None
+storage_ack_listener_task = None
+
+BROKER_URI = "ws://127.0.0.1:8001/broker"
+HAYSTACK_URL = "http://127.0.0.1:8002"
 
 
 # ==================== LIFESPAN ====================
@@ -26,8 +29,9 @@ broker_listener_task = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup - spusť background task
-    global broker_listener_task
+    global broker_listener_task, storage_ack_listener_task
     broker_listener_task = asyncio.create_task(listen_to_broker_results())
+    storage_ack_listener_task = asyncio.create_task(listen_to_storage_ack())
     print("Background task spusten")
     
     yield
@@ -35,7 +39,11 @@ async def lifespan(app: FastAPI):
     # Shutdown - zastavit background task
     if broker_listener_task:
         broker_listener_task.cancel()
-        print("Background task zastaven")
+        print("Image background task zastaven")
+
+    if storage_ack_listener_task:
+        storage_ack_listener_task.cancel()
+        print("Storage ACK background task zastaven")
 
 
 app = FastAPI(lifespan=lifespan)
@@ -91,8 +99,11 @@ class FileInfoResponse(BaseModel):
     id: str
     user_id: str
     filename: str
-    path: str
-    size: int
+    path: str | None = None
+    size: int | None = None
+    status: str
+    volume_id: int | None = None
+    offset: int | None = None
     created_at: datetime
     
     class Config:
@@ -180,7 +191,7 @@ async def send_to_broker(message: dict):
 def read_item(item_id: int, q: str | None = None):
     return {"item_id": item_id, "q": q}
 
-@app.post("/files/upload", response_model=FileInfoResponse)
+@app.post("/files/upload", response_model=FileInfoResponse, status_code=202)
 async def upload_file(
     file: Annotated[UploadFile, File()],
     user_id: Annotated[str, Form()],
@@ -194,36 +205,30 @@ async def upload_file(
     if not bucket:
         raise HTTPException(status_code=404, detail="Bucket neexistuje")
 
-    bucket_dir = os.path.join(STORAGE_DIR, bucket_id)
-    os.makedirs(bucket_dir, exist_ok=True)
-
-    file_ext = os.path.splitext(file.filename)[1]
-    file_path = os.path.join(bucket_dir, file_id + file_ext)
-
-    '''file_path = os.path.join(bucket_dir, file_id)'''
-
-    async with aiofiles.open(file_path, 'wb') as out_file:
-        content = await file.read()
-        await out_file.write(content)
-
+    content = await file.read()
     file_size = len(content)
-    bucket.bandwidth_bytes += file_size
-    
-    # Save to database
+
     file_record = FileRecord(
         id=file_id,
         user_id=user_id,
         filename=file.filename,
-        path=file_path,
+        path=None,
         size=file_size,
+        status="uploading",
+        volume_id=None,
+        offset=None,
         created_at=datetime.utcnow(),
         bucket_id=bucket_id
     )
+
     db.add(file_record)
     db.commit()
     db.refresh(file_record)
 
+    asyncio.create_task(send_to_haystack(file_id, content))
+
     return file_record
+
 
 @app.get("/files/{file_id}")
 async def get_file(file_id: str, db: Session = Depends(get_db)):
@@ -231,17 +236,34 @@ async def get_file(file_id: str, db: Session = Depends(get_db)):
 
     if not file_record or file_record.is_deleted:
         raise HTTPException(status_code=404, detail="Soubor nenalezen")
-    
+
+    if file_record.status != "ready":
+        raise HTTPException(status_code=409, detail="Soubor jeste neni pripraveny")
+
+    if file_record.volume_id is None or file_record.offset is None or file_record.size is None:
+        raise HTTPException(status_code=500, detail="Soubor nema ulozene Haystack metadata")
+
+    url = f"{HAYSTACK_URL}/volume/{file_record.volume_id}/{file_record.offset}/{file_record.size}"
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url)
+
+    if response.status_code != 200:
+        raise HTTPException(status_code=502, detail="Haystack Storage Node nevratil data")
+
     bucket = db.query(Bucket).filter(Bucket.id == file_record.bucket_id).first()
 
     if bucket:
         bucket.bandwidth_bytes += file_record.size
         db.commit()
-    
-    if not os.path.exists(file_record.path):
-        raise HTTPException(status_code=404, detail="Soubor na disku chybí")
-        
-    return FileResponse(path=file_record.path, filename=file_record.filename)
+
+    return Response(
+        content=response.content,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="{file_record.filename}"'
+        }
+    )
 
 
 @app.delete("/files/{file_id}", response_model=DeleteMessageResponse)
@@ -254,13 +276,9 @@ def delete_file(file_id: str, user_id: str, db: Session = Depends(get_db)):
 
     if file_record.user_id != user_id:
         raise HTTPException(status_code=403, detail="NEMAS PRISTUP DUPO")
-    
-    if os.path.exists(file_record.path):
-        os.remove(file_record.path)
 
     file_record.is_deleted = True
 
-    #db.delete(file_record)
     db.commit()
 
     return {"message": "soubor je fuč"}
@@ -461,3 +479,87 @@ async def listen_to_broker_results():
         except Exception as e:
             print(f"Chyba v broker listeneru: {e}")
             await asyncio.sleep(5)  # Počkej před reconnectem
+
+
+async def send_to_haystack(object_id: str, file_data: bytes):
+    encoded_data = base64.b64encode(file_data).decode("utf-8")
+
+    async with websockets.connect(BROKER_URI) as ws:
+        await ws.send(json.dumps({
+            "action": "publish",
+            "topic": "storage.write",
+            "payload": {
+                "object_id": object_id,
+                "data": encoded_data
+            }
+        }))
+
+async def listen_to_storage_ack():
+    while True:
+        try:
+            print("[Gateway] Pripojuji se na broker kvuli storage.ack...")
+
+            async with websockets.connect(BROKER_URI) as ws:
+                await ws.send(json.dumps({
+                    "action": "subscribe",
+                    "topic": "storage.ack"
+                }))
+
+                print("[Gateway] Nasloucham na storage.ack...")
+
+                while True:
+                    msg = await ws.recv()
+
+                    if isinstance(msg, bytes):
+                        msg = msg.decode()
+
+                    data = json.loads(msg)
+                    payload = data.get("payload", data)
+
+                    object_id = payload.get("object_id")
+                    volume_id = payload.get("volume_id")
+                    offset = payload.get("offset")
+                    size = payload.get("size")
+
+                    if not object_id or volume_id is None or offset is None or size is None:
+                        print(f"[Gateway] Ignoruju neuplny storage ack: {payload}")
+                        continue
+
+                    db = SessionLocal()
+                    try:
+                        file_record = db.query(FileRecord).filter(
+                            FileRecord.id == object_id
+                        ).first()
+
+                        if not file_record:
+                            print(f"[Gateway] Soubor pro ACK nenalezen: {object_id}")
+                            continue
+
+                        file_record.volume_id = volume_id
+                        file_record.offset = offset
+                        file_record.size = size
+                        file_record.status = "ready"
+
+                        bucket = db.query(Bucket).filter(
+                            Bucket.id == file_record.bucket_id
+                        ).first()
+
+                        if bucket:
+                            bucket.bandwidth_bytes += size
+
+                        db.commit()
+
+                        print(
+                            f"[Gateway] ACK ulozen do DB: object_id={object_id}, "
+                            f"volume={volume_id}, offset={offset}, size={size}"
+                        )
+
+                    except Exception as e:
+                        print(f"[Gateway] Chyba pri storage ACK: {e}")
+                        db.rollback()
+                    finally:
+                        db.close()
+
+        except Exception as e:
+            print(f"[Gateway] Chyba storage ACK listeneru: {e}")
+            await asyncio.sleep(5)
